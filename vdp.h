@@ -54,7 +54,7 @@
 #define FLAG_PENDING       0x10
 #define FLAG_READ_FETCHED  0x20
 #define FLAG_DMA_RUN       0x40
-#define FLAG_DMA_PROG      0x80
+#define FLAG_WINDOW_EDGE   0x80
 
 #define FLAG2_VINT_PENDING   0x01
 #define FLAG2_HINT_PENDING   0x02

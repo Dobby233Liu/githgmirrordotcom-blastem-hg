@@ -1154,8 +1154,12 @@ static void read_map_scroll(uint16_t column, uint16_t vsram_off, uint32_t line, 
 			context->v_offset = (line) & v_offset_mask;
 			context->flags |= FLAG_WINDOW;
 			return;
+		} else if (column == right_col) {
+			context->flags |= FLAG_WINDOW_EDGE;
+			context->flags &= ~FLAG_WINDOW;
+		} else {
+			context->flags &= ~(FLAG_WINDOW_EDGE|FLAG_WINDOW);
 		}
-		context->flags &= ~FLAG_WINDOW;
 	}
 	//TODO: Verify behavior for 0x20 case
 	uint16_t vscroll = 0xFF | (context->regs[REG_SCROLL] & 0x30) << 4;
@@ -1348,7 +1352,7 @@ static sh_pixel composite_highlight(vdp_context *context, uint8_t *debug_dst, ui
 	return (sh_pixel){.index = pixel, .intensity = intensity};
 }
 
-static void render_normal(vdp_context *context, int32_t col, uint8_t *dst, uint8_t *debug_dst, int plane_a_off, int plane_b_off)
+static void render_normal(vdp_context *context, int32_t col, uint8_t *dst, uint8_t *debug_dst, uint8_t *buf_a, int plane_a_off, int plane_a_mask, int plane_b_off)
 {
 	uint8_t *sprite_buf = context->linebuf + col * 8;
 	if (!col && (context->regs[REG_MODE_1] & BIT_COL0_MASK)) {
@@ -1362,7 +1366,7 @@ static void render_normal(vdp_context *context, int32_t col, uint8_t *dst, uint8
 		for (int i = 0; i < 8; ++plane_a_off, ++plane_b_off, ++sprite_buf, ++i)
 		{
 			uint8_t sprite, plane_a, plane_b;
-			plane_a = context->tmp_buf_a[plane_a_off & SCROLL_BUFFER_MASK];
+			plane_a = buf_a[plane_a_off & plane_a_mask];
 			plane_b = context->tmp_buf_b[plane_b_off & SCROLL_BUFFER_MASK];
 			*(dst++) = composite_normal(context, debug_dst, *sprite_buf, plane_a, plane_b, context->regs[REG_BG_COLOR]) & 0x3F;
 			debug_dst++;
@@ -1371,7 +1375,7 @@ static void render_normal(vdp_context *context, int32_t col, uint8_t *dst, uint8
 		for (int i = 0; i < 16; ++plane_a_off, ++plane_b_off, ++sprite_buf, ++i)
 		{
 			uint8_t sprite, plane_a, plane_b;
-			plane_a = context->tmp_buf_a[plane_a_off & SCROLL_BUFFER_MASK];
+			plane_a = buf_a[plane_a_off & plane_a_mask];
 			plane_b = context->tmp_buf_b[plane_b_off & SCROLL_BUFFER_MASK];
 			*(dst++) = composite_normal(context, debug_dst, *sprite_buf, plane_a, plane_b, context->regs[REG_BG_COLOR]) & 0x3F;
 			debug_dst++;
@@ -1379,7 +1383,7 @@ static void render_normal(vdp_context *context, int32_t col, uint8_t *dst, uint8
 	}
 }
 
-static void render_highlight(vdp_context *context, int32_t col, uint8_t *dst, uint8_t *debug_dst, int plane_a_off, int plane_b_off)
+static void render_highlight(vdp_context *context, int32_t col, uint8_t *dst, uint8_t *debug_dst, uint8_t *buf_a, int plane_a_off, int plane_a_mask, int plane_b_off)
 {
 	int start = 0;
 	if (!col && (context->regs[REG_MODE_1] & BIT_COL0_MASK)) {
@@ -1393,7 +1397,7 @@ static void render_highlight(vdp_context *context, int32_t col, uint8_t *dst, ui
 	for (int i = start; i < 16; ++plane_a_off, ++plane_b_off, ++sprite_buf, ++i)
 	{
 		uint8_t sprite, plane_a, plane_b;
-		plane_a = context->tmp_buf_a[plane_a_off & SCROLL_BUFFER_MASK];
+		plane_a = buf_a[plane_a_off & plane_a_mask];
 		plane_b = context->tmp_buf_b[plane_b_off & SCROLL_BUFFER_MASK];
 		sprite = *sprite_buf;
 		sh_pixel pixel = composite_highlight(context, debug_dst, sprite, plane_a, plane_b, context->regs[REG_BG_COLOR]);
@@ -1410,7 +1414,7 @@ static void render_highlight(vdp_context *context, int32_t col, uint8_t *dst, ui
 	}
 }
 
-static void render_testreg(vdp_context *context, int32_t col, uint8_t *dst, uint8_t *debug_dst, int plane_a_off, int plane_b_off, uint8_t output_disabled, uint8_t test_layer)
+static void render_testreg(vdp_context *context, int32_t col, uint8_t *dst, uint8_t *debug_dst, uint8_t *buf_a, int plane_a_off, int plane_a_mask, int plane_b_off, uint8_t output_disabled, uint8_t test_layer)
 {
 	if (output_disabled) {
 		switch (test_layer)
@@ -1434,7 +1438,7 @@ static void render_testreg(vdp_context *context, int32_t col, uint8_t *dst, uint
 		case 2:
 			for (int i = 0; i < 16; i++)
 			{
-				*(dst++) = context->tmp_buf_a[(plane_a_off++) & SCROLL_BUFFER_MASK] & 0x3F;
+				*(dst++) = buf_a[(plane_a_off++) & plane_a_mask] & 0x3F;
 				*(debug_dst++) = DBG_SRC_A;
 			}
 			break;
@@ -1464,7 +1468,7 @@ static void render_testreg(vdp_context *context, int32_t col, uint8_t *dst, uint
 					}
 					break;
 				case 2:
-					pixel &= context->tmp_buf_a[(plane_a_off + i) & SCROLL_BUFFER_MASK];
+					pixel &= buf_a[(plane_a_off + i) & plane_a_mask];
 					if (pixel) {
 						src = DBG_SRC_A;
 					}
@@ -1488,7 +1492,7 @@ static void render_testreg(vdp_context *context, int32_t col, uint8_t *dst, uint
 		for (int i = start; i < 16; ++plane_a_off, ++plane_b_off, ++sprite_buf, ++i)
 		{
 			uint8_t sprite, plane_a, plane_b;
-			plane_a = context->tmp_buf_a[plane_a_off & SCROLL_BUFFER_MASK];
+			plane_a = buf_a[plane_a_off & plane_a_mask];
 			plane_b = context->tmp_buf_b[plane_b_off & SCROLL_BUFFER_MASK];
 			sprite = *sprite_buf;
 			uint8_t pixel = composite_normal(context, debug_dst, sprite, plane_a, plane_b, 0x3F) & 0x3F;
@@ -1519,7 +1523,7 @@ static void render_testreg(vdp_context *context, int32_t col, uint8_t *dst, uint
 	}
 }
 
-static void render_testreg_highlight(vdp_context *context, int32_t col, uint8_t *dst, uint8_t *debug_dst, int plane_a_off, int plane_b_off, uint8_t output_disabled, uint8_t test_layer)
+static void render_testreg_highlight(vdp_context *context, int32_t col, uint8_t *dst, uint8_t *debug_dst, uint8_t *buf_a, int plane_a_off, int plane_a_mask, int plane_b_off, uint8_t output_disabled, uint8_t test_layer)
 {
 	int start = 0;
 	uint8_t *sprite_buf = context->linebuf + col * 8;
@@ -1538,7 +1542,7 @@ static void render_testreg_highlight(vdp_context *context, int32_t col, uint8_t 
 				}
 				break;
 			case 2:
-				pixel &= context->tmp_buf_a[(plane_a_off + i) & SCROLL_BUFFER_MASK];
+				pixel &= buf_a[(plane_a_off + i) & plane_a_mask];
 				if (pixel) {
 					src = DBG_SRC_A | DBG_SHADOW;
 				}
@@ -1562,7 +1566,7 @@ static void render_testreg_highlight(vdp_context *context, int32_t col, uint8_t 
 	for (int i = start; i < 16; ++plane_a_off, ++plane_b_off, ++sprite_buf, ++i)
 	{
 		uint8_t sprite, plane_a, plane_b;
-		plane_a = context->tmp_buf_a[plane_a_off & SCROLL_BUFFER_MASK];
+		plane_a = buf_a[plane_a_off & plane_a_mask];
 		plane_b = context->tmp_buf_b[plane_b_off & SCROLL_BUFFER_MASK];
 		sprite = *sprite_buf;
 		sh_pixel pixel = composite_highlight(context, debug_dst, sprite, plane_a, plane_b, 0x3F);
@@ -1636,27 +1640,40 @@ static void render_map_output(uint32_t line, int32_t col, vdp_context * context)
 		
 		
 		uint8_t a_src, src;
+		uint8_t *buf_a;
+		int plane_a_mask;
 		if (context->flags & FLAG_WINDOW) {
 			plane_a_off = context->buf_a_off;
+			buf_a = context->tmp_buf_a;
 			a_src = DBG_SRC_W;
+			plane_a_mask = SCROLL_BUFFER_MASK;
 		} else {
-			plane_a_off = context->buf_a_off - context->hscroll_a_fine;
+			if (context->flags & FLAG_WINDOW_EDGE) {
+				buf_a = context->tmp_buf_a + context->buf_a_off;
+				plane_a_mask = 15;
+				plane_a_off = -context->hscroll_a_fine;
+			} else {
+				plane_a_off = context->buf_a_off - context->hscroll_a_fine;
+				plane_a_mask = SCROLL_BUFFER_MASK;
+				buf_a = context->tmp_buf_a;
+			}
 			a_src = DBG_SRC_A;
 		}
+		plane_a_off &= plane_a_mask;
 		plane_b_off = context->buf_b_off - context->hscroll_b_fine;
 		//printf("A | tmp_buf offset: %d\n", 8 - (context->hscroll_a & 0x7));
 
 		if (context->regs[REG_MODE_4] & BIT_HILIGHT) {
 			if (output_disabled || test_layer) {
-				render_testreg_highlight(context, col, dst, debug_dst, plane_a_off, plane_b_off, output_disabled, test_layer);
+				render_testreg_highlight(context, col, dst, debug_dst, buf_a, plane_a_off, plane_a_mask, plane_b_off, output_disabled, test_layer);
 			} else {
-				render_highlight(context, col, dst, debug_dst, plane_a_off, plane_b_off);
+				render_highlight(context, col, dst, debug_dst, buf_a, plane_a_off, plane_a_mask, plane_b_off);
 			}
 		} else {
 			if (output_disabled || test_layer) {
-				render_testreg(context, col, dst, debug_dst, plane_a_off, plane_b_off, output_disabled, test_layer);
+				render_testreg(context, col, dst, debug_dst, buf_a, plane_a_off, plane_a_mask, plane_b_off, output_disabled, test_layer);
 			} else {
-				render_normal(context, col, dst, debug_dst, plane_a_off, plane_b_off);
+				render_normal(context, col, dst, debug_dst, buf_a, plane_a_off, plane_a_mask, plane_b_off);
 			}
 		}
 		dst += 16;
